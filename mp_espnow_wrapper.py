@@ -6,38 +6,22 @@ from binascii import crc32
 from time import ticks_ms, ticks_diff
 
 def parse_mac_address(mac_addr_str):
-    """Parses a MAC address string into a bytes object."""
     return bytes(int(b, 16) for b in mac_addr_str.split(':')) if mac_addr_str else None
 
 def format_mac_address(mac_addr):
-    """Formats a MAC address bytes object into a human-readable string."""
     return ':'.join('%02x' % b for b in mac_addr)
 
 def alive_counter_generator():
-    """Generator that cycles through values from 0 to 15 for message tracking."""
     while True:
         for i in range(16):
             yield struct.pack('!B', i)
 
 class ESPNowManager:
-    """
-    Manages ESP-NOW communication with peer devices using asynchronous messaging.
-    """
     START_BYTE = b'\x02' * 4
     END_BYTE = b'\x55'
-    ACK_MSG = b'\x06\x06'  # Example ACK message
+    ACK_MSG = b'\x06\x06'  # Beispiel-ACK-Nachricht
     
-    def __init__(self, peer=None, rxbuf=None, timeout=5, cycle_time=5, wait_msg_ack=False, debug=False):
-        """
-        Initializes the ESP-NOW manager.
-        
-        :param peer: MAC address of the peer device (as a string)
-        :param rxbuf: Buffer size for receiving messages
-        :param timeout: Timeout for receiving messages (in seconds)
-        :param cycle_time: Time between sending message chunks (in milliseconds)
-        :param wait_msg_ack: Whether to wait for an acknowledgment (ACK)
-        :param debug: Enables debug output
-        """
+    def __init__(self, peer=None, rxbuf=None, timeout=1000, cycle_time=5, wait_msg_ack=False, debug=False):
         if not WLAN().active():
             WLAN(STA_IF).active(True)
         self.esp = AIOESPNow()
@@ -54,23 +38,26 @@ class ESPNowManager:
         self.timeout = timeout
         self.alive_counter_gen = alive_counter_generator()
         self.CHUNK_SIZE = 250
-        self.lock = False
-        self.waiting_for_ack = False
+        self.lock = asyncio.Lock()
+        self.ACK_received = asyncio.Event()
         if self.peer:
             self.esp.add_peer(self.peer)
     
     def set_callback(self, event, callback):
-        """Registers a callback function for specific events (on_receive, on_timeout)."""
         if event in self.callbacks:
             self.callbacks[event] = callback
 
+    async def send_ACK(self):
+        await self.lock.acquire()
+        if self.debug:
+            print('Sending ACK')
+        self.esp.send(self.peer, self.ACK_MSG)
+        self.lock.release()
+
     async def send_message(self, message: bytes):
-        """
-        Sends a message asynchronously, splitting it into chunks if necessary.
-        """
-        if self.lock or message is None:
+        if message is None:
             return
-        self.lock = True
+        await self.lock.acquire()
 
         delta_first = len(self.START_BYTE) + 4
         delta_last = len(self.END_BYTE) + 4
@@ -105,26 +92,23 @@ class ESPNowManager:
                 else:
                     send(peer, chunk)
             except Exception as e:
-                print('Error sending message:', e)
+                print('Fehler beim Senden:', e)
             await asyncio.sleep_ms(cycle_time)
         
+        self.lock.release()
+        
         if self.wait_msg_ack:
-            self.waiting_for_ack = True
-            ack_start = ticks_ms()
             if self.debug:
                 print('Waiting for ACK')
-            while self.waiting_for_ack and ticks_diff(ticks_ms(), ack_start) < self.timeout * 1000:
-                await asyncio.sleep_ms(cycle_time)
-            
-            if self.waiting_for_ack:
-                print("ACK not received, message may be lost")
-        
-        self.lock = False
+            await asyncio.wait_for_ms(self.ACK_received.wait(), timeout=self.timeout)
+            if self.ACK_received.is_set():
+                if self.debug:
+                    print("ACK erhalten")
+            else:
+                print("ACK nicht erhalten, Nachricht möglicherweise verworfen")
+            self.ACK_received.clear()
 
     async def receive_message(self):
-        """
-        Asynchronously receives messages, reconstructing multi-chunk messages when needed.
-        """
         last_alive_counter = None
         syncing = True
         expected_length = None
@@ -135,28 +119,28 @@ class ESPNowManager:
         debug = self.debug
         while True:
             try:
-                start = ticks_ms()
-                _, msg = await asyncio.wait_for(airecv(), timeout=timeout)
+                _, msg = await asyncio.wait_for_ms(airecv(), timeout=timeout)
                 
                 if msg == self.ACK_MSG:
-                    self.waiting_for_ack = False
+                    self.ACK_received.set()
                     continue
                 
                 if len(msg) > self.CHUNK_SIZE:
                     syncing = True
                     if debug:
-                        print("Warning: Message too large! Waiting for start byte...")
+                        print("Warnung: Nachricht zu groß! Warten auf Start-Byte...")
                     continue
 
                 if syncing:
                     if msg.startswith(self.START_BYTE):
+                        start = ticks_ms()
                         last_alive_counter = None
                         syncing = False
                         msg = msg[len(self.START_BYTE):]
 
                         if len(msg) < 5:
                             if debug:
-                                print("Error: Invalid start chunk")
+                                print("Fehler: Ungültiger Start-Chunk")
                             syncing = True
                             continue
 
@@ -170,7 +154,7 @@ class ESPNowManager:
                 alive_counter = msg[0]
                 if last_alive_counter is not None and ((last_alive_counter + 1) % 16) != alive_counter:
                     if debug:
-                        print(f"Warning: Alive counter jump detected!")
+                        print(f"Warnung: Alive-Counter-Sprung erkannt!")
                     syncing = True
                     continue
                 last_alive_counter = alive_counter
@@ -178,7 +162,7 @@ class ESPNowManager:
 
                 if expected_length - buffer_index <= self.CHUNK_SIZE and msg.endswith(self.END_BYTE):
                     if len(msg) < 5:
-                        print("Error: Last chunk too small!")
+                        print("Fehler: Letztes Chunk zu klein!")
                         syncing = True
                         continue
 
@@ -187,7 +171,7 @@ class ESPNowManager:
                     syncing = True
 
                 if buffer_index + len(msg) > expected_length:
-                    print("Error: Message larger than expected!")
+                    print("Fehler: Nachricht größer als erwartet!")
                     syncing = True
                     continue
 
@@ -199,11 +183,11 @@ class ESPNowManager:
                     if received_crc == calculated_crc:
                         if callbacks['on_receive']:
                             callbacks['on_receive'](msg_buffer)
-                        if self.debug:
-                            print('Sending ACK')
-                        self.esp.send(self.peer, self.ACK_MSG)
+                            if debug:
+                                print('Empfangszeit:', ticks_diff(ticks_ms(), start))
+                        await self.send_ACK()
                     else:
-                        print("CRC error: Message corrupted")
+                        print("CRC-Fehler: Nachricht beschädigt")
                     msg_buffer = None
                     received_crc = None
             except asyncio.TimeoutError:
