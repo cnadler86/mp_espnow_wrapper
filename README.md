@@ -38,7 +38,7 @@ asyncio.run(esp_manager.receive_message())
 ## Configuration
 - `peer`: MAC address of the target device (default: broadcast)
 - `rxbuf`: Buffer size for incoming messages
-- `timeout`: Message receive timeout in seconds
+- `timeout`: Message receive timeout in ms
 - `cycle_time`: Interval between message chunks (ms). In order to run stables needs to be > 2-3 ms
 - `wait_msg_ack`: Whether to wait for message acknowledgment. This includes the respective on_receive callback at the receiver.
 - `debug`: Enables debug output
