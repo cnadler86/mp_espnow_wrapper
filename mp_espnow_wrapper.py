@@ -5,13 +5,16 @@ import struct
 from binascii import crc32
 from time import ticks_ms, ticks_diff
 
-def parse_mac_address(mac_addr_str):
+def parse_mac_address(mac_addr_str: str) -> bytes:
+    """Parses a MAC address string into bytes."""
     return bytes(int(b, 16) for b in mac_addr_str.split(':')) if mac_addr_str else None
 
-def format_mac_address(mac_addr):
+def format_mac_address(mac_addr: bytes) -> str:
+    """Formats a MAC address from bytes to a string."""
     return ':'.join('%02x' % b for b in mac_addr)
 
 def alive_counter_generator():
+    """Generates a cyclic alive counter."""
     while True:
         for i in range(16):
             yield struct.pack('!B', i)
@@ -22,7 +25,9 @@ class ESPNowManager:
     ACK_MSG = b'\x06\x06'
     CHUNK_SIZE = 250
     
-    def __init__(self, peer:str=None, rxbuf:int=None, timeout_ms:int=1000, cycle_time_ms:int=5, wait_msg_ack:bool=False, send_ack_afetr_cb:bool=False,send_async:bool=False, debug:bool=False):
+    def __init__(self, peer: str = None, rxbuf: int = None, timeout_ms: int = 1000, cycle_time_ms: int = 5, 
+                 wait_msg_ack: bool = False, send_ack_after_cb: bool = False, send_async: bool = False, debug: bool = False):
+        """Initializes the ESPNowManager."""
         if not WLAN().active():
             WLAN(STA_IF).active(True)
         self.esp = AIOESPNow()
@@ -34,12 +39,9 @@ class ESPNowManager:
         self.peer = parse_mac_address(peer) or b'\xFF' * 6
         self.debug = debug
         self.wait_msg_ack = wait_msg_ack
-        self.send_ack_afetr_cb = send_ack_afetr_cb
+        self.send_ack_after_cb = send_ack_after_cb
         self.send_async = send_async
-        if self.send_async:
-            self._send = self.esp.asend
-        else:
-            self._send = self.esp.send
+        self._send = self.esp.asend if send_async else self.esp.send
         self.cycle_time_ms = cycle_time_ms
         self.callbacks = {'on_receive': None, 'on_timeout': None}
         self.timeout_ms = timeout_ms
@@ -49,63 +51,62 @@ class ESPNowManager:
         if self.peer:
             self.esp.add_peer(self.peer)
     
-    def set_callback(self, event, callback):
+    def set_callback(self, event: str, callback):
+        """Sets a callback for a specific event."""
         if event in self.callbacks:
             self.callbacks[event] = callback
 
     def init(self):
+        """Initializes the ESPNowManager by starting the receive task."""
         asyncio.create_task(self._receive_message())
         
     async def _send_ACK(self):
-        await self.lock.acquire()
-        if self.debug:
-            print('Sending ACK')
-        self.esp.send(self.peer, self.ACK_MSG)
-        self.lock.release()
+        """Sends an acknowledgment message."""
+        async with self.lock:
+            if self.debug:
+                print('Sending ACK')
+            self.esp.send(self.peer, self.ACK_MSG)
 
-    async def send(self, message:bytes):
+    async def send(self, message: bytes):
+        """Sends a message in chunks."""
         if message is None:
             return
-        await self.lock.acquire()
-
-        delta_first = len(self.START_BYTE) + 4
-        delta_last = len(self.END_BYTE) + 4
-        chunk_size_init = self.CHUNK_SIZE - 1
-        send = self._send
-        send_async = self.send_async
-        peer = self.peer
-        alive_counter = self.alive_counter_gen
-        header = self.START_BYTE + struct.pack('!I', len(message))
-        foot = struct.pack('!I', crc32(message)) + self.END_BYTE
-        cycle_time_ms = self.cycle_time_ms
-        
-        is_first = True
-        while message:
-            chunk_size = chunk_size_init
-            is_last = len(message) <= chunk_size - delta_last
+        async with self.lock:
+            delta_first = len(self.START_BYTE) + 4
+            delta_last = len(self.END_BYTE) + 4
+            chunk_size_init = self.CHUNK_SIZE - 1
+            send = self._send
+            peer = self.peer
+            alive_counter = self.alive_counter_gen
+            header = self.START_BYTE + struct.pack('!I', len(message))
+            foot = struct.pack('!I', crc32(message)) + self.END_BYTE
+            cycle_time_ms = self.cycle_time_ms
             
-            if is_first:
-                chunk_size -= delta_first
-            elif is_last:  
-                chunk_size -= delta_last
+            is_first = True
+            while message:
+                chunk_size = chunk_size_init
+                is_last = len(message) <= chunk_size - delta_last
+                
+                if is_first:
+                    chunk_size -= delta_first
+                elif is_last:  
+                    chunk_size -= delta_last
 
-            chunk = message[:chunk_size]
-            message = message[chunk_size:]
+                chunk = message[:chunk_size]
+                message = message[chunk_size:]
 
-            chunk = (header if is_first else b'') + next(alive_counter) + chunk + (foot if is_last else b'')
-            if is_first:
-                is_first = False
-            
-            try:
-                if send_async:
-                    await send(peer, chunk)
-                else:
-                    send(peer, chunk)
-            except Exception as e:
-                print('Error sending message:', e)
-            await asyncio.sleep_ms(cycle_time_ms)
-        
-        self.lock.release()
+                chunk = (header if is_first else b'') + next(alive_counter) + chunk + (foot if is_last else b'')
+                if is_first:
+                    is_first = False
+                
+                try:
+                    if self.send_async:
+                        await send(peer, chunk)
+                    else:
+                        send(peer, chunk)
+                except Exception as e:
+                    print('Error sending message:', e)
+                await asyncio.sleep_ms(cycle_time_ms)
         
         if self.wait_msg_ack:
             if self.debug:
@@ -122,6 +123,7 @@ class ESPNowManager:
             self.ACK_received.clear()
 
     async def _receive_message(self):
+        """Receives messages and handles them."""
         last_alive_counter = None
         syncing = True
         expected_length = None
@@ -194,12 +196,14 @@ class ESPNowManager:
                 if buffer_index >= expected_length and received_crc is not None:
                     calculated_crc = crc32(msg_buffer)
                     if received_crc == calculated_crc:
-                        await self._send_ACK() if not self.send_ack_afetr_cb else None
+                        if not self.send_ack_after_cb:
+                            await self._send_ACK()
                         if callbacks['on_receive']:
                             await callbacks['on_receive'](msg_buffer)
                             if debug:
                                 print('Receive time:', ticks_diff(ticks_ms(), start))
-                        await self._send_ACK() if self.send_ack_afetr_cb else None
+                        if self.send_ack_after_cb:
+                            await self._send_ACK()
                     else:
                         print("CRC error: Message corrupted")
                     msg_buffer = None
