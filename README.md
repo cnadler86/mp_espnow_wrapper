@@ -17,6 +17,7 @@ from mp_espnow_wrapper import ESPNowManager
 
 esp_manager = ESPNowManager(peer='AA:BB:CC:DD:EE:FF', debug=True)
 esp_manager.set_callback('on_receive', lambda msg: print("Received:", msg))
+esp_manager.init()
 ```
 
 ### Sending Messages
@@ -25,27 +26,21 @@ import asyncio
 
 async def send():
     message = b'Hello ESP-NOW!'
-    await esp_manager.send_message(message)
+    await esp_manager.send(message)
 
 asyncio.run(send())
 ```
 
 ### Receiving Messages
-```python
-asyncio.run(esp_manager.receive_message())
-```
+The `init` method starts the message receiving process automatically.
+Register a receive-callback by `set_callback('on_receive',<calback>)`. The callback needs to accept only one argument, namely the message
 
 ## Configuration
 - `peer`: MAC address of the target device (default: broadcast)
 - `rxbuf`: Buffer size for incoming messages
-- `timeout`: Message receive timeout in ms
-- `cycle_time`: Interval between message chunks (ms). In order to run stables needs to be > 2-3 ms
+- `timeout_ms`: Message receive timeout in ms
+- `cycle_time_ms`: Interval between message chunks (ms). In order to run stables needs to be > 2-3 ms
 - `wait_msg_ack`: Whether to wait for message acknowledgment. This includes the respective on_receive callback at the receiver.
+- `send_ack_afetr_cb`: Whether to send ACK after the callback execution.
+- `send_async`: Whether to send messages asynchronously.
 - `debug`: Enables debug output
-
-## License
-This project is licensed under the MIT License.
-
-## Contribution
-Feel free to submit issues or pull requests to improve the project!
-
