@@ -1,0 +1,7 @@
+{
+  "urls": [
+    ["mp_espnow_wrapper.py", "github:cnadler86/mp_espnow_wrapper/mp_espnow_wrapper.py"]
+  ],
+  "version": "1.0.0",
+  "deps": []
+}
